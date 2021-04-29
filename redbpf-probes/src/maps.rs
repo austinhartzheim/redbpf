@@ -103,6 +103,88 @@ impl<K, V> HashMap<K, V> {
     }
 }
 
+/// Hash table map.
+///
+/// High level API for BPF_MAP_TYPE_LRU_HASH maps.
+#[repr(transparent)]
+pub struct LruHashMap<K, V> {
+    def: bpf_map_def,
+    _k: PhantomData<K>,
+    _v: PhantomData<V>,
+}
+
+impl<K, V> LruHashMap<K, V> {
+    /// Creates a map with the specified maximum number of elements.
+    pub const fn with_max_entries(max_entries: u32) -> Self {
+        Self {
+            def: bpf_map_def {
+                type_: bpf_map_type_BPF_MAP_TYPE_LRU_HASH,
+                key_size: mem::size_of::<K>() as u32,
+                value_size: mem::size_of::<V>() as u32,
+                max_entries,
+                map_flags: 0,
+            },
+            _k: PhantomData,
+            _v: PhantomData,
+        }
+    }
+
+    /// Returns a reference to the value corresponding to the key.
+    #[inline]
+    pub fn get(&mut self, key: &K) -> Option<&V> {
+        unsafe {
+            let value = bpf_map_lookup_elem(
+                &mut self.def as *mut _ as *mut c_void,
+                key as *const _ as *const c_void,
+            );
+            if value.is_null() {
+                None
+            } else {
+                Some(&*(value as *const V))
+            }
+        }
+    }
+
+    #[inline]
+    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        unsafe {
+            let value = bpf_map_lookup_elem(
+                &mut self.def as *mut _ as *mut c_void,
+                key as *const _ as *const c_void,
+            );
+            if value.is_null() {
+                None
+            } else {
+                Some(&mut *(value as *mut V))
+            }
+        }
+    }
+
+    /// Set the `value` in the map for `key`
+    #[inline]
+    pub fn set(&mut self, key: &K, value: &V) {
+        unsafe {
+            bpf_map_update_elem(
+                &mut self.def as *mut _ as *mut c_void,
+                key as *const _ as *const c_void,
+                value as *const _ as *const c_void,
+                BPF_ANY.into(),
+            );
+        }
+    }
+
+    /// Delete the entry indexed by `key`
+    #[inline]
+    pub fn delete(&mut self, key: &K) {
+        unsafe {
+            bpf_map_delete_elem(
+                &mut self.def as *mut _ as *mut c_void,
+                key as *const _ as *const c_void,
+            );
+        }
+    }
+}
+
 /// Flags that can be passed to `PerfMap::insert_with_flags`.
 #[derive(Debug, Copy, Clone)]
 pub struct PerfMapFlags {

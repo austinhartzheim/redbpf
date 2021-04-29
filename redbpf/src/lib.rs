@@ -148,6 +148,12 @@ pub struct HashMap<'a, K: Clone, V: Clone> {
     _v: PhantomData<V>,
 }
 
+pub struct LruHashMap<'a, K: Clone, V: Clone> {
+    base: &'a Map,
+    _k: PhantomData<K>,
+    _v: PhantomData<V>,
+}
+
 pub struct StackTrace<'a> {
     base: &'a Map,
 }
@@ -862,6 +868,61 @@ impl<'base, K: Clone, V: Clone> HashMap<'base, K, V> {
     }
 }
 
+impl<'base, K: Clone, V: Clone> LruHashMap<'base, K, V> {
+    pub fn new(base: &Map) -> Result<LruHashMap<K, V>> {
+        if mem::size_of::<K>() != base.config.key_size as usize
+            || mem::size_of::<V>() != base.config.value_size as usize
+        {
+            return Err(Error::Map);
+        }
+
+        Ok(LruHashMap {
+            base,
+            _k: PhantomData,
+            _v: PhantomData,
+        })
+    }
+
+    pub fn set(&self, mut key: K, mut value: V) {
+        unsafe {
+            bpf_sys::bpf_update_elem(
+                self.base.fd,
+                &mut key as *mut _ as *mut _,
+                &mut value as *mut _ as *mut _,
+                0,
+            );
+        }
+    }
+
+    pub fn get(&self, mut key: K) -> Option<V> {
+        let mut value = MaybeUninit::zeroed();
+        if unsafe {
+            bpf_sys::bpf_lookup_elem(
+                self.base.fd,
+                &mut key as *mut _ as *mut _,
+                &mut value as *mut _ as *mut _,
+            )
+        } < 0
+        {
+            return None;
+        }
+        Some(unsafe { value.assume_init() })
+    }
+
+    pub fn delete(&self, mut key: K) {
+        unsafe {
+            bpf_sys::bpf_delete_elem(self.base.fd, &mut key as *mut _ as *mut _);
+        }
+    }
+
+    pub fn iter<'a>(&'a self) -> LruMapIter<'a, '_, K, V> {
+        LruMapIter {
+            map: self,
+            key: None,
+        }
+    }
+}
+
 impl<'base> ProgramArray<'base> {
     pub fn new(base: &Map) -> Result<ProgramArray> {
         if mem::size_of::<u32>() != base.config.key_size as usize
@@ -930,6 +991,54 @@ pub struct MapIter<'a, 'b, K: Clone, V: Clone> {
 }
 
 impl<K: Clone, V: Clone> Iterator for MapIter<'_, '_, K, V> {
+    type Item = (K, V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let key = self.key.take();
+        self.key = match key {
+            Some(mut key) => {
+                let mut next_key = MaybeUninit::<K>::zeroed();
+                let ret = unsafe {
+                    bpf_sys::bpf_get_next_key(
+                        self.map.base.fd,
+                        &mut key as *mut _ as *mut _,
+                        &mut next_key as *mut _ as *mut _,
+                    )
+                };
+                if ret < 0 {
+                    None
+                } else {
+                    Some(unsafe { next_key.assume_init() })
+                }
+            }
+            None => {
+                let mut key = MaybeUninit::<K>::zeroed();
+                if unsafe {
+                    bpf_sys::bpf_get_first_key(
+                        self.map.base.fd,
+                        &mut key as *mut _ as *mut _,
+                        self.map.base.config.key_size.into(),
+                    )
+                } < 0
+                {
+                    None
+                } else {
+                    Some(unsafe { key.assume_init() })
+                }
+            }
+        };
+
+        let key = self.key.as_ref()?.clone();
+        Some((key.clone(), self.map.get(key).unwrap()))
+    }
+}
+
+pub struct LruMapIter<'a, 'b, K: Clone, V: Clone> {
+    map: &'a LruHashMap<'b, K, V>,
+    key: Option<K>,
+}
+
+impl<K: Clone, V: Clone> Iterator for LruMapIter<'_, '_, K, V> {
     type Item = (K, V);
 
     fn next(&mut self) -> Option<Self::Item> {
